@@ -1,1 +1,23 @@
+# Python requirements for unit tests
+-r ../requirements.txt
+
+# Static code analysis
+pylint
+pycodestyle
+pep257
+
+# Comment because no tests are executed!
 unittest2
+mock
+
+# Use py.test as test-runner
+pytest
+pytest-cov
+
+# Freeze the time -)
+freezegun
+
+coverage
+
+# Report coverage results to codecov.io
+codecov

@@ -73,19 +73,15 @@ class TestConfig(ShinkenModulesTest):
         return False
 
     def update_broker(self, dodeepcopy=False):
-        # The brok should be manage in the good order
-        ids = self.sched.brokers['Default-Broker']['broks'].keys()
-        ids.sort()
-        for brok_id in ids:
-            brok = self.sched.brokers['Default-Broker']['broks'][brok_id]
-            #print "Managing a brok type", brok.type, "of id", brok_id
-            #if brok.type == 'update_service_status':
-            #    print "Problem?", brok.data['is_problem']
+        """Overloads the Shinken update_broker method because it does not handle
+        the broks list as a list but as a dict !"""
+        for brok in self.sched.brokers['Default-Broker']['broks']:
             if dodeepcopy:
                 brok = copy.deepcopy(brok)
             brok.prepare()
+            # print("Managing a brok, type: %s" % brok.type)
             self.livestatus_broker.manage_brok(brok)
-        self.sched.brokers['Default-Broker']['broks'] = {}
+        self.sched.brokers['Default-Broker']['broks'] = []
 
     def tearDown(self):
         self.livestatus_broker.db.commit()
@@ -110,15 +106,30 @@ class TestConfig(ShinkenModulesTest):
 @mock_livestatus_handle_request
 class TestConfigSmall(TestConfig):
     def setUp(self):
+        setup_state_time = time.time()
         self.setup_with_file('etc/shinken_1r_1h_1s.cfg')
-        Comment.id = 1
         self.testid = str(os.getpid() + random.randint(1, 1000))
-        self.init_livestatus()
-        print "Cleaning old broks?"
+
+        self.cfg_database = 'test' + self.testid
+
+        dbmodconf = Module({
+            'module_name': 'LogStore',
+            'module_type': 'logstore_sqlite',
+            'database_file': self.cfg_database,
+            'max_logs_age': '3m'
+        })
+
+        self.init_livestatus(dbmodconf=dbmodconf)
+
+        print("Requesting initial status broks...")
         self.sched.conf.skip_initial_broks = False
-        self.sched.brokers['Default-Broker'] = {'broks' : {}, 'has_full_broks' : False}
+        self.sched.brokers['Default-Broker'] = {'broks': [], 'has_full_broks': False}
         self.sched.fill_initial_broks('Default-Broker')
+        print("My initial broks: %d broks" % (len(self.sched.brokers['Default-Broker'])))
+
         self.update_broker()
+        print("Initial setup duration:", time.time() - setup_state_time)
+
         self.nagios_path = None
         self.livestatus_path = None
         self.nagios_config = None
@@ -126,7 +137,8 @@ class TestConfigSmall(TestConfig):
         # but still get DOWN state
         host = self.sched.hosts.find_by_name("test_host_0")
         host.__class__.use_aggressive_host_checking = 1
-        #
+
+        # Some cleanings
         for file in os.listdir('tmp'):
             if os.path.isfile(file):
                 os.remove(os.path.join('tmp', file))
@@ -134,8 +146,6 @@ class TestConfigSmall(TestConfig):
             for db in os.listdir("tmp/archives"):
                 print "cleanup", db
                 os.remove(os.path.join("tmp/archives", db))
-
-
 
     def write_logs(self, host, loops=0):
         for loop in range(0, loops):
@@ -219,7 +229,6 @@ Columns: time type options state host_name"""
             print "archive is", day[2]
             print "handle is", day[1]
         print self.livestatus_broker.db.log_db_relevant_files(now - 3600, now + 3600)
-
 
     def test_num_logs(self):
         self.print_header()
@@ -473,7 +482,6 @@ Columns: time type options state host_name"""
         print "lengths is", lengths
         self.assertEqual([12, 28, 44, 60], lengths)
 
-
     def test_archives_path(self):
         #os.removedirs("var/archives")
         self.print_header()
@@ -548,25 +556,44 @@ ResponseHeader: fixed16
 class TestConfigBig(TestConfig):
 
     def setUp(self):
-        start_setUp = time.time()
-        self.setup_with_file('etc/shinken_5r_100h_2000s.cfg')
-        Comment.id = 1
-        self.testid = str(os.getpid() + random.randint(1, 1000))
-        self.init_livestatus()
-        print "Cleaning old broks?"
-        self.sched.conf.skip_initial_broks = False
-        self.sched.brokers['Default-Broker'] = {'broks' : {}, 'has_full_broks' : False}
-        self.sched.fill_initial_broks('Default-Broker')
+        setup_state_time = time.time()
+        print("%s - starting setup..." % time.strftime("%H:%M:%S"))
 
+        # self.setup_with_file('etc/shinken_1r_1h_1s.cfg')
+        self.setup_with_file('etc/shinken_5r_100h_2000s.cfg')
+
+        self.testid = str(os.getpid() + random.randint(1, 1000))
+        print("%s - Initial setup duration: %.2f seconds" % (time.strftime("%H:%M:%S"),
+                                                             time.time() - setup_state_time))
+
+        self.cfg_database = 'test' + self.testid
+
+        dbmodconf = Module({
+            'module_name': 'LogStore',
+            'module_type': 'logstore_sqlite',
+            'database_file': self.cfg_database,
+            'max_logs_age': '3m'
+        })
+
+        self.init_livestatus(dbmodconf=dbmodconf)
+        print("%s - Initialized livestatus: %.2f seconds" % (time.strftime("%H:%M:%S"),
+                                                             time.time() - setup_state_time))
+
+        print("Requesting initial status broks...")
+        self.sched.conf.skip_initial_broks = False
+        self.sched.brokers['Default-Broker'] = {'broks': [], 'has_full_broks': False}
+        self.sched.fill_initial_broks('Default-Broker')
         self.update_broker()
-        print "************* Overall Setup:", time.time() - start_setUp
+        print("%s - Initial setup duration: %.2f seconds" % (time.strftime("%H:%M:%S"),
+                                                             time.time() - setup_state_time))
+
         # add use_aggressive_host_checking so we can mix exit codes 1 and 2
         # but still get DOWN state
         host = self.sched.hosts.find_by_name("test_host_000")
+        # host = self.sched.hosts.find_by_name("test_host_0")
         host.__class__.use_aggressive_host_checking = 1
 
     def test_a_long_history(self):
-        #return
         test_host_005 = self.sched.hosts.find_by_name("test_host_005")
         test_host_099 = self.sched.hosts.find_by_name("test_host_099")
         test_ok_00 = self.sched.services.find_srv_by_name_and_hostname("test_host_005", "test_ok_00")
