@@ -26,3 +26,5 @@ Shinken module for exporting the logs to a sqlite db from the Livestatus module
 
 How does it work
 =================
+
+Enable this module and the livestatus module in the broker modules list.

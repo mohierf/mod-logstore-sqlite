@@ -34,10 +34,11 @@ import time
 import random
 import copy
 
+import pytest
+import sqlite3
 
 from shinken_modules import ShinkenModulesTest
 from shinken_test import time_hacker, unittest
-
 
 from shinken.objects.module import Module
 from shinken.objects.service import Service
@@ -92,7 +93,6 @@ class TestConfig(ShinkenModulesTest):
             os.remove(self.livelogs + "-journal")
         if os.path.exists("tmp/archives"):
             for db in os.listdir("tmp/archives"):
-                print "cleanup", db
                 os.remove(os.path.join("tmp/archives", db))
         if os.path.exists('var/nagios.log'):
             os.remove('var/nagios.log')
@@ -110,16 +110,7 @@ class TestConfigSmall(TestConfig):
         self.setup_with_file('etc/shinken_1r_1h_1s.cfg')
         self.testid = str(os.getpid() + random.randint(1, 1000))
 
-        self.cfg_database = 'test' + self.testid
-
-        dbmodconf = Module({
-            'module_name': 'LogStore',
-            'module_type': 'logstore_sqlite',
-            'database_file': self.cfg_database,
-            'max_logs_age': '3m'
-        })
-
-        self.init_livestatus(dbmodconf=dbmodconf)
+        self.init_livestatus()
 
         print("Requesting initial status broks...")
         self.sched.conf.skip_initial_broks = False
@@ -144,22 +135,85 @@ class TestConfigSmall(TestConfig):
                 os.remove(os.path.join('tmp', file))
         if os.path.exists("tmp/archives"):
             for db in os.listdir("tmp/archives"):
-                print "cleanup", db
-                os.remove(os.path.join("tmp/archives", db))
+                if os.path.isfile(db):
+                    os.remove(os.path.join("tmp/archives", db))
 
     def write_logs(self, host, loops=0):
         for loop in range(0, loops):
             host.state = 'DOWN'
             host.state_type = 'SOFT'
             host.attempt = 1
-            host.output = "i am down"
+            host.output = "I am DOWN"
             host.raise_alert_log_entry()
             host.state = 'UP'
             host.state_type = 'HARD'
             host.attempt = 1
-            host.output = "i am down"
+            host.output = "I am UP"
             host.raise_alert_log_entry()
             self.update_broker()
+
+    def save_and_query_db(self, logs_count=0, archives=False):
+        self.livestatus_broker.db.commit()
+
+        numlogs = self.livestatus_broker.db.execute("SELECT COUNT(*) FROM logs")
+        print("Log count (module): %s" % numlogs)
+        self.assertEqual(numlogs[0][0], logs_count)
+
+        # Save the database for offline analysis
+        if os.path.exists(self.livelogs):
+            print("Livelogs saving: %s" % os.path.abspath(self.livelogs))
+            shutil.copyfile(self.livelogs, "/tmp/livelogs")
+        if os.path.exists(self.livelogs + "-journal"):
+            print("Livelogs journal saving: %s" % os.path.abspath(self.livelogs + "-journal"))
+            shutil.copyfile(self.livelogs + "-journal", "/tmp/livelogs-journal")
+
+        # Direct DB connection and query
+        con = sqlite3.connect("/tmp/livelogs")
+        cursor = con.cursor()
+        cursor.execute("select count(*) from logs")
+        records = cursor.fetchall()
+        cursor.close()
+        # May be different from the module count!
+        print("Log count (sqlite): %s" % len(records))
+        # self.assertEqual(records[0][0], logs_count)
+
+        if not archives:
+            return
+
+        self.assertTrue(os.path.exists("tmp/archives"))
+
+        print("DB archive files:")
+        dbs = []
+        for d in os.listdir("tmp/archives"):
+            print("- %s" % d)
+            if not d.endswith("journal"):
+                dbs.append(d)
+        # tempres = [d for d in os.listdir("tmp/archives") if not d.endswith("journal")]
+        self.assertEqual(4, len(dbs))
+        lengths = []
+        for db in sorted(dbs):
+            dbmodconf = Module({
+                'module_name': 'LogStore',
+                'module_type': 'logstore_sqlite',
+                'use_aggressive_sql': '0',
+                'database_file': "tmp/archives/" + db,
+                'archive_path': "tmp/archives/",
+                'max_logs_age': '0',
+            })
+            tmpconn = LiveStatusLogStoreSqlite(dbmodconf)
+            tmpconn.open()
+            numlogs = tmpconn.execute("SELECT COUNT(*) FROM logs")
+            lengths.append(numlogs[0][0])
+            print("DB daily file: %s (%d logs)" % (db, numlogs[0][0]))
+            tmpconn.close()
+
+        numlogs = self.livestatus_broker.db.execute("SELECT COUNT(*) FROM logs")
+        print("Log count (module): %s" % numlogs)
+        lengths.append(numlogs[0][0])
+        self.assertEqual(numlogs[0][0], logs_count)
+
+        print("lengths is: %s" % lengths)
+        self.assertEqual([6, 14, 22, 30, 8], lengths)
 
     def test_hostsbygroup(self):
         self.print_header()
@@ -277,7 +331,7 @@ Columns: time type options state host_name"""
         # after daylight-saving time has begun or ended,
         # this test may fail for some days
         #
-        #os.removedirs("var/archives")
+        # os.removedirs("var/archives")
         self.print_header()
         host = self.sched.hosts.find_by_name("test_host_0")
         save_now = time.time()
@@ -298,115 +352,106 @@ Columns: time type options state host_name"""
         time_hacker.time_warp(-1 * (now - back4days_noon))
         now = time.time()
         print "4t is", time.asctime(time.localtime(int(now)))
-        logs = 0
+        logs_count = 0
         for day in range(1, 5):
             print "day", day
             # at 12:00
             now = time.time()
             print "it is", time.asctime(time.localtime(int(now)))
             self.write_logs(host, day)
-            logs += 2 * day
+            logs_count += 2 * day
             time.sleep(3600)
             # at 13:00
             now = time.time()
             print "it is", time.asctime(time.localtime(int(now)))
             self.write_logs(host, day)
-            logs += 2 * day
+            logs_count += 2 * day
             time.sleep(36000)
             # at 23:00
             now = time.time()
             print "it is", time.asctime(time.localtime(int(now)))
             self.write_logs(host, day)
-            logs += 2 * day
+            logs_count += 2 * day
             time.sleep(3600)
             # at 00:00
             now = time.time()
             print "it is", time.asctime(time.localtime(int(now)))
             self.write_logs(host, day)
-            logs += 2 * day
+            logs_count += 2 * day
             time.sleep(43200)
         # day 1: 1 * (2 + 2 + 2)
         # day 2: 2 * (2 + 2 + 2) + 1 * 2 (from last loop)
         # day 3: 3 * (2 + 2 + 2) + 2 * 2 (from last loop)
         # day 4: 4 * (2 + 2 + 2) + 3 * 2 (from last loop)
         # today: 4 * 2 (from last loop)
+        logs_today = 8
         # 6 + 14 + 22 + 30  + 8 = 80
         now = time.time()
         print "0t is", time.asctime(time.localtime(int(now)))
+
+        self.save_and_query_db(logs_count=logs_count)
+
         request = """GET log
-OutputFormat: python
-Columns: time type options state host_name"""
+        OutputFormat: python
+        Columns: time type options state host_name"""
         response, keepalive = self.livestatus_broker.livestatus.handle_request(request)
-        print response
         pyresponse = eval(response)
-        # ignore these internal logs
+        # ignore the internal logs (if some exist...)
         pyresponse = [l for l in pyresponse if l[1].strip() not in ["Warning", "Info", "Debug"]]
-        print "Raw pyresponse", pyresponse
         print "pyresponse", len(pyresponse)
-        print "expect", logs
-        self.assertEqual(logs, len(pyresponse))
+        print "expect", logs_count
+        self.assertEqual(len(pyresponse), logs_count)
 
+        # fixme: if not close / open the DB module, the next query returns nothing!
+        # because the DB connection looks like lost !
+        # fixme: find out if it is important and why
+        self.livestatus_broker.db.close()
+        self.livestatus_broker.db.open()
+
+        numlogs = self.livestatus_broker.db.execute("SELECT COUNT(*) FROM logs")
+        print("+++ Log count: %s" % numlogs)
+        self.assertEqual(numlogs[0][0], logs_count)
+
+        self.save_and_query_db(logs_count=logs_count)
+
+        # Without close / open of the DB module, the 4 expected files are not
+        # created... there is no logical reason to this!
         self.livestatus_broker.db.log_db_do_archive()
-        self.assert_(os.path.exists("tmp/archives"))
-        tempres = [d for d in os.listdir("tmp/archives") if not d.endswith("journal")]
-        self.assertEqual(4, len(tempres))
-        lengths = []
-        for db in sorted(tempres):
-            dbmodconf = Module({'module_name': 'LogStore',
-                'module_type': 'logstore_sqlite',
-                'use_aggressive_sql': '0',
-                'database_file': "tmp/archives/" + db,
-                'archive_path': "tmp/archives/",
-                'max_logs_age': '0',
-            })
-            tmpconn = LiveStatusLogStoreSqlite(dbmodconf)
-            tmpconn.open()
-            numlogs = tmpconn.execute("SELECT COUNT(*) FROM logs")
-            lengths.append(numlogs[0][0])
-            print "db entries", db, numlogs
-            tmpconn.close()
-        print "lengths is", lengths
-        self.assertEqual([6, 14, 22, 30], lengths)
+
+        # Only today's logs
+        self.save_and_query_db(logs_count=logs_today, archives=True)
 
         request = """GET log
-Filter: time >= """ + str(int(back4days_morning)) + """
-Filter: time <= """ + str(int(back2days_noon)) + """
-OutputFormat: python
-Columns: time type options state host_name"""
+        Filter: time >= """ + str(int(back4days_morning)) + """
+        Filter: time <= """ + str(int(back2days_noon)) + """
+        OutputFormat: python
+        Columns: time type options state host_name"""
+        print("Request: %s" % request)
         response, keepalive = self.livestatus_broker.livestatus.handle_request(request)
-        print response
         pyresponse = eval(response)
         self.assertEqual(30, len(pyresponse))
-        print "pyresponse", len(pyresponse)
-        print "expect", logs
 
         self.livestatus_broker.db.log_db_do_archive()
 
         request = """GET log
-Filter: time >= """ + str(int(back4days_morning)) + """
-Filter: time <= """ + str(int(back2days_noon)) + """
-OutputFormat: python
-Columns: time type options state host_name"""
+        Filter: time >= """ + str(int(back4days_morning)) + """
+        Filter: time <= """ + str(int(back2days_noon)) + """
+        OutputFormat: python
+        Columns: time type options state host_name"""
         response, keepalive = self.livestatus_broker.livestatus.handle_request(request)
-        print response
         pyresponse = eval(response)
         self.assertEqual(30, len(pyresponse))
-        print "pyresponse", len(pyresponse)
-        print "expect", logs
 
         self.livestatus_broker.db.log_db_do_archive()
 
         request = """GET log
-Filter: time >= """ + str(int(back4days_morning)) + """
-Filter: time <= """ + str(int(back2days_noon) - 1) + """
-OutputFormat: python
-Columns: time type options state host_name"""
+        Filter: time >= """ + str(int(back4days_morning)) + """
+        Filter: time <= """ + str(int(back2days_noon) - 1) + """
+        OutputFormat: python
+        Columns: time type options state host_name"""
         response, keepalive = self.livestatus_broker.livestatus.handle_request(request)
-        print response
         pyresponse = eval(response)
         self.assertEqual(24, len(pyresponse))
-        print "pyresponse", len(pyresponse)
-        print "expect", logs
 
         # now warp to the time when we entered this test
         time_hacker.time_warp(-1 * (time.time() - save_now))
@@ -429,32 +474,32 @@ Columns: time type options state host_name"""
         now = time.time()
         time.sleep(5)
         print "4t is", time.asctime(time.localtime(int(now)))
-        logs = 0
+        # logs_count = 0
         for day in range(1, 5):
             print "day", day
             # at 12:00
             now = time.time()
             print "it is", time.asctime(time.localtime(int(now)))
             self.write_logs(host, day)
-            logs += 2 * day
+            logs_count += 2 * day
             time.sleep(3600)
             # at 13:00
             now = time.time()
             print "it is", time.asctime(time.localtime(int(now)))
             self.write_logs(host, day)
-            logs += 2 * day
+            logs_count += 2 * day
             time.sleep(36000)
             # at 23:00
             now = time.time()
             print "it is", time.asctime(time.localtime(int(now)))
             self.write_logs(host, day)
-            logs += 2 * day
+            logs_count += 2 * day
             time.sleep(3600)
             # at 00:00
             now = time.time()
             print "it is", time.asctime(time.localtime(int(now)))
             self.write_logs(host, day)
-            logs += 2 * day
+            logs_count += 2 * day
             time.sleep(43200)
         # day 1: 1 * (2 + 2 + 2)
         # day 2: 2 * (2 + 2 + 2) + 1 * 2 (from last loop)
@@ -462,12 +507,36 @@ Columns: time type options state host_name"""
         # day 4: 4 * (2 + 2 + 2) + 3 * 2 (from last loop)
         # today: 4 * 2 (from last loop)
         # 6 + 14 + 22 + 30  + 8 = 80
+
+        request = """GET log
+        OutputFormat: python
+        Columns: time type options state host_name"""
+        response, keepalive = self.livestatus_broker.livestatus.handle_request(request)
+        pyresponse = eval(response)
+        # ignore the internal logs (if some exist...)
+        pyresponse = [l for l in pyresponse if l[1].strip() not in ["Warning", "Info", "Debug"]]
+        print "pyresponse", len(pyresponse)
+        print "expect", logs_count
+        self.assertEqual(len(pyresponse), logs_count)
+
+        # fixme: if not close / open the DB module, the next query returns nothing!
+        # because the DB connection looks like lost !
+        # fixme: find out if it is important and why
+        self.livestatus_broker.db.close()
+        self.livestatus_broker.db.open()
+
+        numlogs = self.livestatus_broker.db.execute("SELECT COUNT(*) FROM logs")
+        print("+++ Log count: %s" % numlogs)
+        self.assertEqual(numlogs[0][0], 88)
+        # !!! 80 new records + 8 today's records. Other records were archived...
+
         self.livestatus_broker.db.log_db_do_archive()
-        self.assert_(os.path.exists("tmp/archives"))
-        self.assert_(len([d for d in os.listdir("tmp/archives") if not d.endswith("journal")]) == 4)
+        self.assertTrue(os.path.exists("tmp/archives"))
+        self.assertTrue(len([d for d in os.listdir("tmp/archives") if not d.endswith("journal")]) == 4)
         lengths = []
         for db in sorted([d for d in os.listdir("tmp/archives") if not d.endswith("journal")]):
-            dbmodconf = Module({'module_name': 'LogStore',
+            dbmodconf = Module({
+                'module_name': 'LogStore',
                 'module_type': 'logstore_sqlite',
                 'use_aggressive_sql': '0',
                 'database_file': "tmp/archives/" + db,
@@ -477,13 +546,13 @@ Columns: time type options state host_name"""
             tmpconn.open()
             numlogs = tmpconn.execute("SELECT COUNT(*) FROM logs")
             lengths.append(numlogs[0][0])
-            print "db entries", db, numlogs
+            print("DB daily file: %s (%d logs)" % (db, numlogs[0][0]))
             tmpconn.close()
-        print "lengths is", lengths
+        print("lengths is: %s" % lengths)
         self.assertEqual([12, 28, 44, 60], lengths)
 
     def test_archives_path(self):
-        #os.removedirs("var/archives")
+        # os.removedirs("var/archives")
         self.print_header()
         lengths = []
         database_file = "dotlivestatus.db"
@@ -549,12 +618,11 @@ ResponseHeader: fixed16
         pyresponse = eval(response.splitlines()[1])
         pyresponse = [l for l in pyresponse if l[2].strip() not in ["Warning", "Info", "Debug"]]
         print pyresponse
-        self.assert_(len(pyresponse) == 2)
+        self.assertTrue(len(pyresponse) == 2)
 
 
 @mock_livestatus_handle_request
 class TestConfigBig(TestConfig):
-
     def setUp(self):
         setup_state_time = time.time()
         print("%s - starting setup..." % time.strftime("%H:%M:%S"))
@@ -566,16 +634,17 @@ class TestConfigBig(TestConfig):
         print("%s - Initial setup duration: %.2f seconds" % (time.strftime("%H:%M:%S"),
                                                              time.time() - setup_state_time))
 
-        self.cfg_database = 'test' + self.testid
-
-        dbmodconf = Module({
-            'module_name': 'LogStore',
-            'module_type': 'logstore_sqlite',
-            'database_file': self.cfg_database,
-            'max_logs_age': '3m'
-        })
-
-        self.init_livestatus(dbmodconf=dbmodconf)
+        # self.cfg_database = 'test' + self.testid
+        #
+        # dbmodconf = Module({
+        #     'module_name': 'LogStore',
+        #     'module_type': 'logstore_sqlite',
+        #     'database_file': self.cfg_database,
+        #     'max_logs_age': '3m'
+        # })
+        #
+        # self.init_livestatus(dbmodconf=dbmodconf)
+        self.init_livestatus()
         print("%s - Initialized livestatus: %.2f seconds" % (time.strftime("%H:%M:%S"),
                                                              time.time() - setup_state_time))
 
@@ -793,7 +862,7 @@ OutputFormat: json"""
         response, keepalive = self.livestatus_broker.livestatus.handle_request(request)
         allpyresponse = eval(response)
         print "all records", len(allpyresponse)
-        self.assert_(len(allpyresponse) == len(notpyresponse) + len(pyresponse))
+        self.assertTrue(len(allpyresponse) == len(notpyresponse) + len(pyresponse))
         # the numlogs above only counts records in the currently attached db
         numlogs = self.livestatus_broker.db.execute("SELECT COUNT(*) FROM logs WHERE time >= %d AND time <= %d" % (int(query_start), int(query_end)))
         print "numlogs is", numlogs
@@ -802,23 +871,37 @@ OutputFormat: json"""
 
 @mock_livestatus_handle_request
 class TestConfigNoLogstore(TestConfig):
-
     def setUp(self):
-        start_setUp = time.time()
+        setup_state_time = time.time()
         self.setup_with_file('etc/shinken_1r_1h_1s.cfg')
-        Comment.id = 1
         self.testid = str(os.getpid() + random.randint(1, 1000))
         self.init_livestatus()
-        print "Cleaning old broks?"
+
+        print("Requesting initial status broks...")
         self.sched.conf.skip_initial_broks = False
-        self.sched.brokers['Default-Broker'] = {'broks' : {}, 'has_full_broks' : False}
+        self.sched.brokers['Default-Broker'] = {'broks': [], 'has_full_broks': False}
         self.sched.fill_initial_broks('Default-Broker')
+        print("My initial broks: %d broks" % (len(self.sched.brokers['Default-Broker'])))
+
         self.update_broker()
-        print "************* Overall Setup:", time.time() - start_setUp
+        print("Initial setup duration:", time.time() - setup_state_time)
+
+        self.nagios_path = None
+        self.livestatus_path = None
+        self.nagios_config = None
         # add use_aggressive_host_checking so we can mix exit codes 1 and 2
         # but still get DOWN state
         host = self.sched.hosts.find_by_name("test_host_0")
         host.__class__.use_aggressive_host_checking = 1
+
+        # Some cleanings
+        for file in os.listdir('tmp'):
+            if os.path.isfile(file):
+                os.remove(os.path.join('tmp', file))
+        if os.path.exists("tmp/archives"):
+            for db in os.listdir("tmp/archives"):
+                if os.path.isfile(db):
+                    os.remove(os.path.join("tmp/archives", db))
 
     def tearDown(self):
         self.livestatus_broker.db.commit()
@@ -863,10 +946,10 @@ class TestConfigNoLogstore(TestConfig):
 
         self.livestatus_broker.init()
 
-        #--- livestatus_broker.main
+        # --- livestatus_broker.main
         self.livestatus_broker.log = logger
         # this seems to damage the logger so that the scheduler can't use it
-        #self.livestatus_broker.log.load_obj(self.livestatus_broker)
+        # self.livestatus_broker.log.load_obj(self.livestatus_broker)
         self.livestatus_broker.debug_output = []
         self.livestatus_broker.modules_manager = ModulesManager('livestatus', modulesctx.get_modulesdir(), [])
         self.livestatus_broker.modules_manager.set_modules(self.livestatus_broker.modules)
@@ -888,25 +971,22 @@ class TestConfigNoLogstore(TestConfig):
         self.livestatus_broker.query_cache = LiveStatusQueryCache()
         self.livestatus_broker.query_cache.disable()
         self.livestatus_broker.rg.register_cache(self.livestatus_broker.query_cache)
-        #--- livestatus_broker.main
+        # --- livestatus_broker.main
 
-        #--- livestatus_broker.do_main
+        # --- livestatus_broker.do_main
         self.livestatus_broker.db = self.livestatus_broker.modules_manager.instances[0]
         self.livestatus_broker.db.open()
-        #--- livestatus_broker.do_main
+        # --- livestatus_broker.do_main
 
-        #--- livestatus_broker.manage_lql_thread
+        # --- livestatus_broker.manage_lql_thread
         self.livestatus_broker.livestatus = LiveStatus(self.livestatus_broker.datamgr, self.livestatus_broker.query_cache, self.livestatus_broker.db, self.livestatus_broker.pnp_path, self.livestatus_broker.from_q)
-        #--- livestatus_broker.manage_lql_thread
+        # --- livestatus_broker.manage_lql_thread
 
     def test_has_implicit_module(self):
-        self.assert_(self.livestatus_broker.modules_manager.instances[0].properties['type'] == 'logstore_sqlite')
-        self.assert_(self.livestatus_broker.modules_manager.instances[0].__class__.__name__ == 'LiveStatusLogStoreSqlite')
-        self.assert_(self.livestatus_broker.db.database_file == self.livelogs)
+        module = self.livestatus_broker.modules_manager.instances[0]
+        self.assertTrue(
+            module.properties['type'] == 'logstore_sqlite')
+        self.assertTrue(
+            module.__class__.__name__ == 'LiveStatusLogStoreSqlite')
 
-
-if __name__ == '__main__':
-    #import cProfile
-    command = """unittest.main()"""
-    unittest.main()
-    #cProfile.runctx( command, globals(), locals(), filename="/tmp/livestatus.profile" )
+        self.assertTrue(self.livestatus_broker.db.database_file == self.livelogs)
