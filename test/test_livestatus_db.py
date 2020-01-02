@@ -269,9 +269,9 @@ ResponseHeader: fixed16
         print "request logs from", int(now - 3600), int(now + 3600)
         print "request logs from", time.asctime(time.localtime(int(now - 3600))), time.asctime(time.localtime(int(now + 3600)))
         request = """GET log
-Filter: time >= """ + str(int(now - 3600)) + """
-Filter: time <= """ + str(int(now + 3600)) + """
-Columns: time type options state host_name"""
+        Filter: time >= """ + str(int(now - 3600)) + """
+        Filter: time <= """ + str(int(now + 3600)) + """
+        Columns: time type options state host_name"""
         response, keepalive = self.livestatus_broker.livestatus.handle_request(request)
         print response
         print "next next_log_db_rotate", time.asctime(time.localtime(self.livestatus_broker.db.next_log_db_rotate))
@@ -620,6 +620,101 @@ ResponseHeader: fixed16
         print pyresponse
         self.assertTrue(len(pyresponse) == 2)
 
+    def test_max_logs_age(self):
+        # 0 - unset
+        db_module_conf = Module({
+            'module_name': 'LogStore',
+            'module_type': 'logstore_sqlite',
+            'database_file': None,
+            'archive_path': None,
+            'logs_table': None,
+            'max_logs_age': None
+        })
+
+        livestatus_broker = LiveStatusLogStoreSqlite(db_module_conf)
+        self.assertEqual("/tmp/livelogs.db", livestatus_broker.database_file)
+        self.assertEqual("/tmp/archives", livestatus_broker.archive_path)
+        self.assertEqual(7, livestatus_broker.max_logs_age)
+
+        # 1 - default
+        db_module_conf = Module({
+            'module_name': 'LogStore',
+            'module_type': 'logstore_sqlite',
+            'database_file': 'livelogs',
+            'archive_path': 'archives',
+            'logs_table': 'ls-logs',
+            'max_logs_age': '7'
+        })
+
+        livestatus_broker = LiveStatusLogStoreSqlite(db_module_conf)
+        self.assertEqual(7, livestatus_broker.max_logs_age)
+
+        # 2 - days
+        db_module_conf = Module({
+            'module_name': 'LogStore',
+            'module_type': 'logstore_sqlite',
+            'database_file': 'livelogs',
+            'archive_path': 'archives',
+            'logs_table': 'ls-logs',
+            'max_logs_age': '7d'
+        })
+
+        livestatus_broker = LiveStatusLogStoreSqlite(db_module_conf)
+        self.assertEqual(7, livestatus_broker.max_logs_age)
+
+        # 3 - weeks
+        db_module_conf = Module({
+            'module_name': 'LogStore',
+            'module_type': 'logstore_sqlite',
+            'database_file': 'livelogs',
+            'archive_path': 'archives',
+            'logs_table': 'ls-logs',
+            'max_logs_age': '1w'
+        })
+
+        livestatus_broker = LiveStatusLogStoreSqlite(db_module_conf)
+        self.assertEqual(7, livestatus_broker.max_logs_age)
+
+        # 4 - months
+        db_module_conf = Module({
+            'module_name': 'LogStore',
+            'module_type': 'logstore_sqlite',
+            'database_file': 'livelogs',
+            'archive_path': 'archives',
+            'logs_table': 'ls-logs',
+            'max_logs_age': '3m'
+        })
+
+        livestatus_broker = LiveStatusLogStoreSqlite(db_module_conf)
+        self.assertEqual(3*31, livestatus_broker.max_logs_age)
+
+        # 5 - years
+        db_module_conf = Module({
+            'module_name': 'LogStore',
+            'module_type': 'logstore_sqlite',
+            'database_file': 'livelogs',
+            'archive_path': 'archives',
+            'logs_table': 'ls-logs',
+            'max_logs_age': '7y'
+        })
+
+        livestatus_broker = LiveStatusLogStoreSqlite(db_module_conf)
+        self.assertEqual(7*365, livestatus_broker.max_logs_age)
+
+        # 6 - wrong format
+        db_module_conf = Module({
+            'module_name': 'LogStore',
+            'module_type': 'logstore_sqlite',
+            'database_file': 'livelogs',
+            'archive_path': 'archives',
+            'logs_table': 'ls-logs',
+            'max_logs_age': 'XxX'
+        })
+
+        livestatus_broker = LiveStatusLogStoreSqlite(db_module_conf)
+        self.assertEqual('XxX', livestatus_broker.max_logs_age)
+        # A warning log is raised!
+
 
 @mock_livestatus_handle_request
 class TestConfigBig(TestConfig):
@@ -662,6 +757,7 @@ class TestConfigBig(TestConfig):
         # host = self.sched.hosts.find_by_name("test_host_0")
         host.__class__.use_aggressive_host_checking = 1
 
+    # @pytest.mark.skip("Temp ...")
     def test_a_long_history(self):
         test_host_005 = self.sched.hosts.find_by_name("test_host_005")
         test_host_099 = self.sched.hosts.find_by_name("test_host_099")
@@ -884,7 +980,8 @@ class TestConfigNoLogstore(TestConfig):
         print("My initial broks: %d broks" % (len(self.sched.brokers['Default-Broker'])))
 
         self.update_broker()
-        print("Initial setup duration:", time.time() - setup_state_time)
+        print("%s - Initial setup duration: %.2f seconds" % (time.strftime("%H:%M:%S"),
+                                                             time.time() - setup_state_time))
 
         self.nagios_path = None
         self.livestatus_path = None

@@ -125,9 +125,9 @@ class LiveStatusLogStoreSqlite(BaseModule):
         # except Exception:
         #     os.mkdir(self.archive_path)
         #
-        self.max_logs_age = DEFAULT_LOGS_AGE
-        if getattr(modconf, 'max_logs_age', 'unset!') is not None:
-            self.max_logs_age = int(getattr(modconf, 'max_logs_age', '365'))
+        self.max_logs_age = getattr(modconf, 'max_logs_age', DEFAULT_LOGS_AGE)
+        if getattr(modconf, 'max_logs_age', 'Unset!') is None:
+            self.max_logs_age = DEFAULT_LOGS_AGE
         maxmatch = re.match(r'^(\d+)([dwmy]*)$', str(self.max_logs_age))
         if maxmatch is None:
             logger.warning('[LogStore SQLite] Wrong format for max_logs_age. '
@@ -144,6 +144,7 @@ class LiveStatusLogStoreSqlite(BaseModule):
         elif maxmatch.group(2) == 'y':
             self.max_logs_age = int(maxmatch.group(1)) * 365
         logger.info("[LogStore SQLite] maximum log age: %d days", self.max_logs_age)
+        print("[LogStore SQLite] maximum log age: %d days", self.max_logs_age)
 
         self.use_aggressive_sql = (getattr(modconf, 'use_aggressive_sql', '0') == '1')
         logger.info("[LogStore SQLite] agressive SQL: %s", self.use_aggressive_sql)
@@ -306,9 +307,7 @@ class LiveStatusLogStoreSqlite(BaseModule):
         except sqlite3.Error as exp:
             logger.error("[Logstore SQLite] An error occurred: %s", str(exp))
             raise
-        except IndexError:
-            pass
-        except KeyError:
+        except (IndexError, KeyError):
             pass
 
         if mintime is None:
@@ -445,13 +444,6 @@ class LiveStatusLogStoreSqlite(BaseModule):
         if values is None:
             values = []
 
-        if sqlite3.paramstyle == 'pyformat':
-            matchcount = 0
-            for _ in re.finditer(r"\?", cmd):
-                cmd = re.sub(r'\\?', '%(' + str(matchcount) + ')s', cmd, 1)
-                matchcount += 1
-            values = dict(zip([str(x) for x in xrange(len(values))], values))
-
         orig_row_factory = getattr(self.dbconn, "row_factory", None)
         if a_row_factory is not None:
             self.dbcursor.close()
@@ -466,9 +458,6 @@ class LiveStatusLogStoreSqlite(BaseModule):
                 rows = self.dbcursor.fetchmany()
                 if not rows:
                     break
-                if a_row_factory is not None:
-                    if sqlite3.paramstyle == 'pyformat':
-                        rows = list(a_row_factory(self.dbcursor, row) for row in rows)
                 yield rows
         finally:
             if a_row_factory:
@@ -486,13 +475,6 @@ class LiveStatusLogStoreSqlite(BaseModule):
         dbresult = []
 
         try:
-            if sqlite3.paramstyle == 'pyformat':
-                matchcount = 0
-                for _ in re.finditer(r"\?", cmd):
-                    cmd = re.sub(r'\\?', '%(' + str(matchcount) + ')s', cmd, 1)
-                    matchcount += 1
-                values = dict(zip([str(x) for x in xrange(len(values))], values))
-
             if cmd.startswith("SELECT"):
                 if a_row_factory:
                     self.dbcursor.close()
@@ -505,8 +487,6 @@ class LiveStatusLogStoreSqlite(BaseModule):
                 self.dbcursor.execute(cmd, values)
                 dbresult = self.dbcursor.fetchall()
                 if a_row_factory:
-                    if sqlite3.paramstyle == 'pyformat':
-                        dbresult = [a_row_factory(self.dbcursor, d) for d in dbresult]
                     self.dbcursor.close()
                     if orig_row_factory:
                         self.dbconn.row_factory = orig_row_factory
@@ -516,7 +496,7 @@ class LiveStatusLogStoreSqlite(BaseModule):
             return dbresult
         except sqlite3.Error as exp:
             logger.error("[Logstore SQLite] execute error %s", str(exp))
-            raise LiveStatusLogStoreError(err)
+            raise LiveStatusLogStoreError(exp)
 
     def execute_attach(self, cmd):
         """
